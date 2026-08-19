@@ -29,6 +29,9 @@ import {
 } from "./utils/reports.js";
 import { cleanupReportRetentionScope } from "./utils/retention.js";
 
+const DEFAULT_REPO = "default";
+const DEFAULT_BRANCH = "default";
+
 type MultipartUploadItem = {
   file: Blob;
   path: string;
@@ -182,7 +185,7 @@ export const createHttpApp = <Bindings extends object = Record<string, never>>(
     }
 
     const body = await c.req.json().catch(() => ({}));
-    const repo = normalizeStringParam(body.repo);
+    const repo = normalizeStringParam(body.repo) ?? DEFAULT_REPO;
     const mainBranch = normalizeStringParam(body.mainBranch ?? body.main_branch);
 
     if (!repo) {
@@ -200,8 +203,8 @@ export const createHttpApp = <Bindings extends object = Record<string, never>>(
 
   app.post("/api/reports", async (c) => {
     const body = await c.req.json().catch(() => ({}));
-    const branch = normalizeStringParam(body.branch);
-    const repo = normalizeStringParam(body.repo);
+    const branch = normalizeStringParam(body.branch) ?? DEFAULT_BRANCH;
+    const repo = normalizeStringParam(body.repo) ?? DEFAULT_REPO;
 
     if (!branch) {
       return c.json({ error: "branch is required" }, 400);
@@ -231,8 +234,8 @@ export const createHttpApp = <Bindings extends object = Record<string, never>>(
 
   app.put("/api/reports/:report_id", async (c) => {
     const body = await c.req.json().catch(() => ({}));
-    const branch = normalizeStringParam(body.branch);
-    const repo = normalizeStringParam(body.repo);
+    const branch = normalizeStringParam(body.branch) ?? DEFAULT_BRANCH;
+    const repo = normalizeStringParam(body.repo) ?? DEFAULT_REPO;
 
     if (!branch) {
       return c.json({ error: "branch is required" }, 400);
@@ -396,11 +399,11 @@ export const createHttpApp = <Bindings extends object = Record<string, never>>(
   });
 
   app.get("/api/history", async (c) => {
-    const repo = normalizeStringParam(c.req.query("repo"));
+    const repo = normalizeStringParam(c.req.query("repo")) ?? DEFAULT_REPO;
     const mainBranch = c.get("mainBranch");
     const project = repo ? await c.get("repositories").projects.findByRepo(repo) : null;
-    const projectMainBranch = project?.mainBranch ?? mainBranch;
-    const branch = c.req.query("branch")?.trim() || projectMainBranch;
+    const projectMainBranch = project?.mainBranch ?? mainBranch ?? DEFAULT_BRANCH;
+    const branch =  normalizeStringParam(c.req.query("branch")) ??  (repo === DEFAULT_REPO ? DEFAULT_BRANCH : projectMainBranch);
     const limitParam = c.req.query("limit");
     const limit = limitParam === undefined ? 10 : Number(limitParam);
 
@@ -446,18 +449,48 @@ export const createHttpApp = <Bindings extends object = Record<string, never>>(
     return c.json({ history }, 200);
   });
 
-  app.get("/reports/tree", async (c) => {
-    const repo = normalizeStringParam(c.req.query("repo"));
+  app.get("/latest", async (c) => {
+    const requestedRepo = normalizeStringParam(c.req.query("repo"));
+    const requestedBranch = normalizeStringParam(c.req.query("branch"));
 
-    if (!repo) {
-      return c.html(
-        `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>repo is required</title></head><body style='background:#f1f5f7ff;font-family:"JetBrainsMonoVF", ui-monospace, monospace;color:#010a18d4;'>repo is required</body></html>`,
-        400,
+    const repo = requestedRepo ?? DEFAULT_REPO;
+
+    const project = await c.get("repositories").projects.findByRepo(repo);
+
+    const branch =
+      requestedBranch ??
+      (requestedRepo
+        ? project?.mainBranch ?? c.get("mainBranch") ?? DEFAULT_BRANCH
+        : DEFAULT_BRANCH);
+
+    const report = await c
+      .get("repositories")
+      .reports.findLatestByRepoAndBranch(repo, branch);
+
+    if (!report) {
+      return c.json(
+        { error: `No completed reports found for ${repo}/${branch}` },
+        404,
       );
     }
 
+    const entrypoint = await resolveReportEntrypointUrl(
+      c.get("repositories").reports,
+      c.get("fileStore"),
+      report.id,
+    );
+
+    if ("error" in entrypoint) {
+      return c.json({ error: entrypoint.error }, 404);
+    }
+
+    return c.redirect(entrypoint.url.replace(/^\/+/, ""));
+  });
+
+  app.get("/reports/tree", async (c) => {
+    const repo = normalizeStringParam(c.req.query("repo")) ?? DEFAULT_REPO;
     const project = await c.get("repositories").projects.findByRepo(repo);
-    const mainBranch = project?.mainBranch ?? c.get("mainBranch");
+    const mainBranch = project?.mainBranch ?? c.get("mainBranch") ?? DEFAULT_BRANCH;
     const reports = await c.get("repositories").reports.listCompleted({ repo });
 
     return c.html(renderReportsTreePage({ mainBranch, repo, reports }), 200);
